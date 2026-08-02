@@ -1,0 +1,228 @@
+name: Build Proton-CachyOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch or tag of CachyOS/proton-cachyos to build (prefer a -slr release tag; dated branches get deleted)'
+        required: true
+        type: string
+        default: 'cachyos-11.0-20260702-slr'
+      march:
+        description: 'CPU optimisation target'
+        required: true
+        type: choice
+        default: 'zen4'
+        options:
+          - zen4
+          - zen3
+          - zen2
+          - x86-64-v4
+          - x86-64-v3
+          - nocona
+      stock:
+        description: 'Stock build: apply no patches, optimisations only (shortens the name postfix)'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Validate only (checkout + patch + configure, no build)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ inputs.march }} @ ${{ inputs.branch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      # Stock runners have ~14 GB free; the checkout alone is ~11 GB.
+      - name: Debloat GitHub runner
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: >-
+            azure-cli
+            google-cloud-cli
+            microsoft-edge-stable
+            google-chrome-stable
+            firefox
+            postgresql*
+            temurin-*
+            *llvm*
+            mysql*
+            dotnet-sdk-*
+          remove_packages_one_command: false
+          remove_folders: >-
+            /usr/share/swift
+            /usr/share/miniconda
+            /usr/share/az*
+            /usr/local/lib/node_modules
+            /usr/local/share/chromium
+            /usr/local/share/powershell
+            /usr/local/julia
+            /usr/local/aws-cli
+            /usr/local/aws-sam-cli
+            /usr/share/gradle
+          testing: false
+
+      - name: Prepare host
+        run: sudo apt-get update && sudo apt-get install -y ccache fontforge-nox
+
+      - name: Checkout overlay
+        uses: actions/checkout@v6
+        with:
+          path: overlay
+
+      - name: Checkout proton-cachyos
+        uses: actions/checkout@v6
+        with:
+          repository: CachyOS/proton-cachyos
+          ref: ${{ inputs.branch }}
+          path: proton-cachyos
+          fetch-depth: 0
+          fetch-tags: true
+          submodules: false
+
+      # A dated branch sits at its -base rebase anchor until CachyOS applies their
+      # wine fork and feature stack. In that state wine still points at upstream's
+      # relative ../wine (a 404) and the submodule fetch fails obscurely.
+      - name: Check branch is a finalised release
+        working-directory: proton-cachyos
+        run: |
+          desc=$(git describe --long --tags)
+          echo "describe: $desc"
+          case "$desc" in
+            *-base-0-g*)
+              echo "::error::${{ inputs.branch }} is still at its -base anchor ($desc) - CachyOS has not finished the rebase, so it cannot be built yet. Pick the previous dated branch."
+              exit 1 ;;
+          esac
+
+      - name: Fetch submodules
+        working-directory: proton-cachyos
+        run: git submodule update --init --filter=tree:0 --recursive
+
+      - name: Apply overlay patches
+        if: ${{ !inputs.stock }}
+        working-directory: proton-cachyos
+        run: |
+          shopt -s nullglob
+          patches=(../overlay/*.patch)
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "::error::no *.patch found at the root of the overlay repo"
+            exit 1
+          fi
+          for p in "${patches[@]}"; do
+            echo "::group::applying $(basename "$p")"
+            git apply --verbose --whitespace=nowarn "$p"
+            echo "::endgroup::"
+          done
+          git --no-pager diff --stat
+
+      - name: Resolve build name and optimisation flags
+        id: cfg
+        working-directory: proton-cachyos
+        run: |
+          case "${{ inputs.march }}" in
+            zen4)      cf="-O3 -march=znver4 -mtune=znver4" ;;
+            zen3)      cf="-O3 -march=znver3 -mtune=znver3" ;;
+            zen2)      cf="-O3 -march=znver2 -mtune=znver2" ;;
+            x86-64-v4) cf="-O3 -march=x86-64-v4 -mtune=core-avx2" ;;
+            x86-64-v3) cf="-O3 -march=x86-64-v3 -mtune=core-avx2" ;;
+            nocona)    cf="-O3 -march=nocona -mtune=core-avx2" ;;
+            *) echo "::error::unhandled march ${{ inputs.march }}"; exit 1 ;;
+          esac
+          # RUSTFLAGS target-cpu stays at nocona for every preset, exactly as upstream
+          # does even for its x86-64-v3 build. The SteamRT SDK's rustc does not know
+          # newer CPU names; an unrecognised -Ctarget-cpu silently falls back to a
+          # subtarget that cannot emit 64-bit code, and gst-plugins-rs dies with
+          # "LLVM ERROR: 64-bit code requested on a subtarget that doesn't support it".
+          rc=nocona
+          # Name: proton-<vendor>-<version>-<postfix>, e.g.
+          #   proton-zi0p4tch0-11.0-20260702-slr-zen4
+          # --tags without --long gives a bare tag name when the ref is exactly a tag
+          # (the usual case), and tag-N-gsha only when it genuinely sits past one.
+          # --long would append a meaningless -0-g<sha> to every tag build, and Steam's
+          # Gamemode UI truncates long display names.
+          base=$(git describe --tags | sed 's/^cachyos-/zi0p4tch0-/')
+          if [ "${{ inputs.stock }}" = "true" ]; then
+            postfix="${{ inputs.march }}"
+          else
+            postfix="linuxuwu-${{ inputs.march }}"
+          fi
+          stock="proton-${base}"
+          suffix="-${postfix}"
+          mkdir -p ./build
+          {
+            echo "cflags=$cf"
+            echo "rustflags=-Copt-level=3 -Ctarget-cpu=$rc"
+            echo "build_name=${stock}${suffix}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Build name: ${stock}${suffix}"
+
+      - name: Configure
+        working-directory: proton-cachyos/build
+        env:
+          CFLAGS: ${{ steps.cfg.outputs.cflags }}
+          RUSTFLAGS: ${{ steps.cfg.outputs.rustflags }}
+          USE_LTO: 0
+        run: |
+          ../configure.sh \
+            --build-name=${{ steps.cfg.outputs.build_name }} \
+            --container-engine=docker \
+            --enable-ccache
+          cat Makefile
+
+      - name: Cache identifier
+        id: ccache-id
+        working-directory: proton-cachyos/build
+        run: |
+          image=$(make get-steamrt-image | tail -1)
+          checksum=$(echo "$image ${{ steps.cfg.outputs.cflags }}" | sha1sum | cut -d' ' -f1)
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ccache
+        id: ccache-restore
+        if: ${{ !inputs.dry_run }}
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.ccache
+          key: ccache-proton-${{ steps.ccache-id.outputs.checksum }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-proton-${{ steps.ccache-id.outputs.checksum }}
+
+      - name: Build
+        if: ${{ !inputs.dry_run }}
+        working-directory: proton-cachyos/build
+        run: make redist
+
+      - name: Save ccache
+        if: ${{ !inputs.dry_run && always() }}
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+
+      # GitHub always wraps artifacts in a zip, so the artifact is named without a
+      # suffix: it downloads as <build_name>.zip containing the .tar.xz and its
+      # checksum, rather than a doubled-up <build_name>.tar.xz.zip.
+      - name: Upload build
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.cfg.outputs.build_name }}
+          path: |
+            proton-cachyos/build/${{ steps.cfg.outputs.build_name }}.tar.xz
+            proton-cachyos/build/${{ steps.cfg.outputs.build_name }}.sha512sum
+          retention-days: 30
+          if-no-files-found: error
