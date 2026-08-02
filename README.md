@@ -23,7 +23,8 @@ with the CPU optimisation you pick, and hands you the result as a downloadable a
 |---|---|---|
 | `branch` | `cachyos-11.0-20260702-slr` | Branch **or tag** of `CachyOS/proton-cachyos` to build from. Prefer an `-slr` **tag** — see below |
 | `march` | `zen4` | CPU target. One of `zen4`, `zen3`, `zen2`, `x86-64-v4`, `x86-64-v3`, `nocona` |
-| `stock` | `false` | Tick to apply **no patches** — a stock upstream build with optimisations only. Shortens the name postfix accordingly |
+| `patch_001` | `true` | Apply patch 001. Untick **both** patches for a stock upstream build with optimisations only |
+| `patch_002` | `true` | Apply patch 002 (default-on runtime env vars). Authored on top of 001, so it requires it |
 | `dry_run` | `false` | Validate only — checkout, patch and configure, then stop. Takes ~5 min instead of hours. Use it to check that a new upstream branch still applies cleanly before committing to a full build |
 
 `march` selects `CFLAGS` only (`nocona` is upstream's stock setting):
@@ -119,7 +120,7 @@ Building an exact tag yields the bare tag name; a ref that sits past a tag keeps
 `-N-g<sha>` offset so the build stays identifiable. Names are kept short deliberately —
 Steam's Gamemode UI truncates long compatibility-tool names in the dropdown.
 
-A `stock` build and a patched build of the same ref get different postfixes, so both can
+An unpatched build and a patched build of the same ref get different postfixes, so both can
 sit in `compatibilitytools.d` at once and be compared from Steam's dropdown.
 
 That exact string is what Steam shows in its compatibility-tool dropdown. It reaches

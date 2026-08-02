@@ -20,11 +20,16 @@ on:
           - x86-64-v4
           - x86-64-v3
           - nocona
-      stock:
-        description: 'Stock build: apply no patches, optimisations only (shortens the name postfix)'
+      patch_001:
+        description: 'Apply patch 001'
         required: false
         type: boolean
-        default: false
+        default: true
+      patch_002:
+        description: 'Apply patch 002 (default-on runtime env vars; needs 001)'
+        required: false
+        type: boolean
+        default: true
       dry_run:
         description: 'Validate only (checkout + patch + configure, no build)'
         required: false
@@ -112,21 +117,34 @@ jobs:
         working-directory: proton-cachyos
         run: git submodule update --init --filter=tree:0 --recursive
 
+      # Patches are applied in sorted order; each is individually selectable.
+      # 002 is authored on top of 001, so applying 002 alone is refused rather
+      # than left to fail deep in the build.
       - name: Apply overlay patches
-        if: ${{ !inputs.stock }}
         working-directory: proton-cachyos
+        env:
+          APPLY_001: ${{ inputs.patch_001 }}
+          APPLY_002: ${{ inputs.patch_002 }}
         run: |
-          shopt -s nullglob
-          patches=(../overlay/*.patch)
-          if [ ${#patches[@]} -eq 0 ]; then
-            echo "::error::no *.patch found at the root of the overlay repo"
+          if [ "$APPLY_002" = "true" ] && [ "$APPLY_001" != "true" ]; then
+            echo "::error::002-defaults.patch is authored on top of 001 and cannot be applied without it"
             exit 1
           fi
-          for p in "${patches[@]}"; do
+          applied=0
+          for p in ../overlay/001-*.patch; do
+            [ "$APPLY_001" = "true" ] || break
             echo "::group::applying $(basename "$p")"
-            git apply --verbose --whitespace=nowarn "$p"
+            git apply --verbose --whitespace=nowarn "$p" && applied=$((applied+1))
             echo "::endgroup::"
           done
+          for p in ../overlay/002-*.patch; do
+            [ "$APPLY_002" = "true" ] || break
+            echo "::group::applying $(basename "$p")"
+            git apply --verbose --whitespace=nowarn "$p" && applied=$((applied+1))
+            echo "::endgroup::"
+          done
+          echo "patches applied: $applied"
+          echo "PATCHES_APPLIED=$applied" >> "$GITHUB_ENV"
           git --no-pager diff --stat
 
       - name: Resolve build name and optimisation flags
@@ -155,7 +173,9 @@ jobs:
           # --long would append a meaningless -0-g<sha> to every tag build, and Steam's
           # Gamemode UI truncates long display names.
           base=$(git describe --tags | sed 's/^cachyos-/zi0p4tch0-/')
-          if [ "${{ inputs.stock }}" = "true" ]; then
+          # An unpatched build is stock upstream source, so it only earns the
+          # -<march> optimisation marker.
+          if [ "${PATCHES_APPLIED:-0}" -eq 0 ]; then
             postfix="${{ inputs.march }}"
           else
             postfix="linuxuwu-${{ inputs.march }}"
