@@ -36,15 +36,19 @@ on:
         type: boolean
         default: false
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
     name: ${{ inputs.march }} @ ${{ inputs.branch }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    # Serialise only identical builds. Different branch/march combinations are
+    # independent and run concurrently, and they use separate ccache keys.
+    # This lives on the job, not the workflow: the inputs context is not
+    # available in workflow-level concurrency, and referencing it there makes
+    # GitHub silently refuse to index the whole file.
+    concurrency:
+      group: ${{ github.workflow }}-${{ inputs.branch }}-${{ inputs.march }}-${{ inputs.patch_001 }}-${{ inputs.patch_002 }}
+      cancel-in-progress: false
 
     steps:
       # Stock runners have ~14 GB free; the checkout alone is ~11 GB.
