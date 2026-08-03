@@ -1,5 +1,10 @@
 name: Build Proton-CachyOS
 
+# The run title is fixed when the run starts, so it can only use inputs - the
+# exact build name comes from git describe at runtime. The resolved name is
+# written to the job summary instead.
+run-name: 'Build Proton-CachyOS: ${{ inputs.branch }} · ${{ inputs.march }}'
+
 on:
   workflow_dispatch:
     inputs:
@@ -193,6 +198,16 @@ jobs:
             echo "build_name=${stock}${suffix}"
           } >> "$GITHUB_OUTPUT"
           echo "Build name: ${stock}${suffix}"
+          {
+            echo "### ${stock}${suffix}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| ref | \`${{ inputs.branch }}\` |"
+            echo "| march | \`${{ inputs.march }}\` |"
+            echo "| cflags | \`$cf\` |"
+            echo "| patches applied | ${PATCHES_APPLIED:-0} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Configure
         working-directory: proton-cachyos/build
